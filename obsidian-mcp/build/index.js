@@ -3,6 +3,9 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema, ErrorCode, McpError, } from "@modelcontextprotocol/sdk/types.js";
 import fs from "fs/promises";
 import path from "path";
+import { exec } from "child_process";
+import { promisify } from "util";
+const execAsync = promisify(exec);
 // Get vault path from environment
 const VAULT_PATH = process.env.OBSIDIAN_VAULT_PATH;
 if (!VAULT_PATH) {
@@ -105,6 +108,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                         },
                     },
                     required: ["notePath"],
+                },
+            },
+            {
+                name: "git-push",
+                description: "Run git push in the Obsidian vault",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        commitMessage: {
+                            type: "string",
+                            description: "Optional commit message. If provided, will run git add . and git commit before pushing.",
+                        },
+                    },
                 },
             }
         ],
@@ -282,6 +298,45 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                     throw new McpError(ErrorCode.InvalidParams, `Note not found: ${notePath}`);
                 }
                 throw new McpError(ErrorCode.InternalError, `Failed to delete note: ${error.message}`);
+            }
+        }
+        case "git-push": {
+            const commitMessage = request.params.arguments?.commitMessage;
+            try {
+                let stdout = "";
+                let stderr = "";
+                if (commitMessage) {
+                    const addResult = await execAsync("git add .", { cwd: VAULT_PATH });
+                    stdout += addResult.stdout;
+                    stderr += addResult.stderr ? addResult.stderr + "\n" : "";
+                    try {
+                        const commitResult = await execAsync(`git commit -m "${commitMessage.replace(/"/g, '\\"')}"`, { cwd: VAULT_PATH });
+                        stdout += commitResult.stdout;
+                        stderr += commitResult.stderr ? commitResult.stderr + "\n" : "";
+                    }
+                    catch (e) {
+                        if (e.stdout && e.stdout.includes("nothing to commit")) {
+                            stdout += e.stdout;
+                        }
+                        else {
+                            throw e;
+                        }
+                    }
+                }
+                const pushResult = await execAsync("git push", { cwd: VAULT_PATH });
+                stdout += pushResult.stdout;
+                stderr += pushResult.stderr ? pushResult.stderr + "\n" : "";
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `Git push completed.\nStdout:\n${stdout}\nStderr:\n${stderr}`,
+                        },
+                    ],
+                };
+            }
+            catch (error) {
+                throw new McpError(ErrorCode.InternalError, `Git push failed: ${error.message}\nStdout: ${error.stdout || ""}\nStderr: ${error.stderr || ""}`);
             }
         }
         default:
